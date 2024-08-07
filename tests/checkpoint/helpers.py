@@ -127,6 +127,7 @@ def init_model(
     sync_module_states=True,
     cpu_offload=False,
     wrap_with_raw_fsdp=False,
+    world_size_for_fsdp=2,
 ) -> Tuple[Union[ComposerModel, torch.nn.Module], Any]:
     if use_composer_model:
         model = SimpleComposerMLP(num_features=num_features, num_classes=num_classes, device=device)
@@ -141,15 +142,15 @@ def init_model(
             sync_module_states=sync_module_states,  # To enable easy comparison between rank 0 unsharded model and full state dict
             cpu_offload=CPUOffload(offload_params=True) if cpu_offload else None,
         )
-
-        if tensor_type == 'dtensor':
-            from torch.distributed.device_mesh import init_device_mesh
-            device_mesh = init_device_mesh('cuda', (2,))
-            fsdp_kwargs['device_mesh'] = device_mesh
-
         if wrap_with_raw_fsdp:
+            if tensor_type == 'dtensor':
+                from torch.distributed.device_mesh import init_device_mesh
+                device_mesh = init_device_mesh('cuda', (world_size_for_fsdp,))
+                fsdp_kwargs['device_mesh'] = device_mesh
             model = FSDP(model, **fsdp_kwargs)
         else:
+            if tensor_type == 'dtensor':
+                fsdp_kwargs['data_parallel_shard_degree'] = world_size_for_fsdp
             prepare_fsdp_module(
                 model,
                 optimizers=None,
