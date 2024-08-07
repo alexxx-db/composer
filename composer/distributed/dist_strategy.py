@@ -23,6 +23,7 @@ from torchmetrics import Metric, MetricCollection
 
 from composer.core import Precision, State
 from composer.core.precision import _validate_precision
+from composer.core.state import _create_device_mesh
 from composer.devices import Device, DeviceGPU
 from composer.distributed.meta_safe_apply import meta_safe_apply
 from composer.distributed.mosaic_parallelism import (
@@ -336,26 +337,30 @@ def prepare_fsdp_module(
     kwargs = {}
     if version.parse(
         torch.__version__.split('.dev')[0],
-    ) >= version.parse('2.2.0') and fsdp_config.device_mesh is not None:
-        if fsdp_config.process_group is not None:
+    ) >= version.parse('2.2.0') and (
+        fsdp_config.data_parallel_replicate_degree is not None or fsdp_config.data_parallel_shard_degree > 0
+    ):
+        if fsdp_config.data_parallel_replicate_degree is None and sharding_strategy == ShardingStrategy.HYBRID_SHARD:
+            sharding_strategy = ShardingStrategy.FULL_SHARD
             warnings.warn(
-                'process_group and device_mesh are set for FSDP, so ignoring device_mesh. Please set process_group to None.',
+                'HYBRID_SHARD is not supported without setting fsdp_config.data_parallel_replicate_degree. Using FULL_SHARD instead.',
             )
-        else:
-            ndim = fsdp_config.device_mesh.ndim
-            if ndim == 1 and sharding_strategy == ShardingStrategy.HYBRID_SHARD:
-                sharding_strategy = ShardingStrategy.FULL_SHARD
-                warnings.warn('HYBRID_SHARD is not supported with 1D device mesh. Using FULL_SHARD instead.')
-            elif ndim == 1 and sharding_strategy == ShardingStrategy._HYBRID_SHARD_ZERO2:
-                sharding_strategy = ShardingStrategy.SHARD_GRAD_OP
-                warnings.warn('_HYBRID_SHARD_ZERO2 is not supported with 1D device mesh. Using SHARD_GRAD_OP instead.')
-            elif ndim == 2 and sharding_strategy == ShardingStrategy.SHARD_GRAD_OP:
-                sharding_strategy = ShardingStrategy._HYBRID_SHARD_ZERO2
-                warnings.warn('SHARD_GRAD_OP is not supported with 2D device mesh. Using _HYBRID_SHARD_ZERO2 instead.')
-            elif ndim == 2 and sharding_strategy == ShardingStrategy.FULL_SHARD:
-                sharding_strategy = ShardingStrategy.HYBRID_SHARD
-                warnings.warn('FULL_SHARD is not supported with 2D device mesh. Using HYBRID_SHARD instead.')
-            kwargs['device_mesh'] = fsdp_config.device_mesh
+        elif fsdp_config.data_parallel_replicate_degree is None and sharding_strategy == ShardingStrategy._HYBRID_SHARD_ZERO2:
+            sharding_strategy = ShardingStrategy.SHARD_GRAD_OP
+            warnings.warn(
+                '_HYBRID_SHARD_ZERO2 is not supported without setting fsdp_config.data_parallel_replicate_degree. Using SHARD_GRAD_OP instead.',
+            )
+        elif fsdp_config.data_parallel_replicate_degree is not None and sharding_strategy == ShardingStrategy.SHARD_GRAD_OP:
+            sharding_strategy = ShardingStrategy._HYBRID_SHARD_ZERO2
+            warnings.warn(
+                f'SHARD_GRAD_OP is not supported with a non-None fsdp_config.data_parallel_replicate_degree. It is set it to {fsdp_config.data_parallel_replicate_degree}. Using _HYBRID_SHARD_ZERO2 instead.',
+            )
+        elif fsdp_config.data_parallel_replicate_degree is not None and sharding_strategy == ShardingStrategy.FULL_SHARD:
+            sharding_strategy = ShardingStrategy.HYBRID_SHARD
+            warnings.warn(
+                'FULL_SHARD is not supported with a non-None fsdp_config.data_parallel_replicate_degree. It is set it to {fsdp_config.data_parallel_replicate_degree}. Using HYBRID_SHARD instead.',
+            )
+        kwargs['device_mesh'] = _create_device_mesh(device=device, fsdp_config=fsdp_config, tp_config=None)
 
     cpu_offload = get_cpu_offload(cpu_offload=fsdp_config.cpu_offload)
 
@@ -367,10 +372,6 @@ def prepare_fsdp_module(
         keep_low_precision_grads=keep_low_precision_grads,
     )
 
-    process_group = None
-    if fsdp_config.process_group is not None:
-        process_group_dict = {'process_group': fsdp_config.process_group}
-        process_group = set_custom_fsdp_module_kwargs(process_group_dict, process_group_cache)['process_group']
     backward_prefetch = BACKWARD_PREFETCH_MAP[fsdp_config.backward_prefetch.upper()]
     activation_checkpointing = fsdp_config.activation_checkpointing
     activation_cpu_offload = fsdp_config.activation_cpu_offload
@@ -571,7 +572,7 @@ def prepare_fsdp_module(
 
             fsdp_obj = FullyShardedDataParallel(
                 obj,
-                process_group=process_group,
+                process_group=None,
                 sharding_strategy=sharding_strategy,
                 auto_wrap_policy=_auto_wrap_policy,  # type: ignore FSDP type bug
                 cpu_offload=cpu_offload,

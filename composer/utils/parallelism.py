@@ -8,6 +8,7 @@ from typing import Any, Optional
 
 from torch.distributed._tensor.device_mesh import DeviceMesh
 
+
 @dataclass
 class FSDPConfig:
     """Configuration for Fully Sharded Data Parallelism (FSDP)."""
